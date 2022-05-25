@@ -52,7 +52,8 @@ class FLServer():
         self.client_list = {}       # key is id, value is data_size
         self.model = MCLR() # initialize global model
 
-        # print(self.model)
+        self.average_loss = -1
+        self.average_accuracy = -1
 
 
     def aggregate_parameters(self, server_model, users, total_train_samples):
@@ -159,12 +160,13 @@ class FLServer():
             if START:
                 print("Start server main process")
 
-                # # send global model to all clients in the client_list
-
-                global_model_data = pickle.dumps(self.model)
+                # send global model to all clients in the client_list
+                global_model_data = pickle.dumps(self.average_loss + " " + self.average_accuracy + " " + self.model)
                 print(len(global_model_data))
                 # print("Global model encoded: ", global_model_data)
+
                 self.send_parameters(global_model_data)
+                
                 break
 
 
