@@ -1,4 +1,5 @@
 from _thread import *
+from re import I
 import threading
 import time
 import socket
@@ -16,6 +17,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 import pickle
+import random
 from COMP3221_FLServer import MCLR
 
 IP = "127.0.0.1"
@@ -36,8 +38,9 @@ class FLClient():
         self.trainloader = None
         self.testloader = DataLoader(self.test_data, self.test_samples)
 
+        self.batch_size = random.choice([5, 10, 20])
         if (self.opt_method == 1):
-            self.trainloader = DataLoader(self.train_data, 5)   # mini-batch size is 5
+            self.trainloader = DataLoader(self.train_data, self.batch_size)   # mini-batch size is 5
         else:
             self.trainloader = DataLoader(self.train_data, self.train_samples)
 
@@ -46,19 +49,23 @@ class FLClient():
 
         self.model = None
         self.optimizer = None
-        # self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate) 
+        
         print("Client: Done initializing")
 
 
     # receive global model from server
     def set_parameters(self, model):
-        if self.model is None: self.model = copy.deepcopy(model)
+        if self.model is None: 
+            self.model = copy.deepcopy(model)
+
+            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate) 
         else:
             for old_param, new_param in zip(self.model.parameters(), model.parameters()):
                 old_param.data = new_param.data
 
     # train to obtain new local model  
     def train(self, epochs):
+        print("Local training...")
         LOSS = 0
         self.model.train()
         for epoch in range(1, epochs + 1):
@@ -79,7 +86,7 @@ class FLClient():
         for x, y in self.testloader:
             output = self.model(x)
             test_acc += (torch.sum(torch.argmax(output, dim=1) == y) * 1. / y.shape[0]).item()
-            print(str(self.id) + ", Accuracy of",self.id, " is: ", test_acc)
+            # print(str(self.id) + ", Accuracy of",self.id, " is: ", test_acc)
         return test_acc
 
 
@@ -110,7 +117,7 @@ class FLClient():
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s: # Create a socket object
                 s.connect((IP, PORT))
                 # Create handshake message that contains data size and id
-                mess_data = bytes(str(self.train_samples) + " " + str(self.id) + " " + str(self.port_no), encoding= 'utf-8')
+                mess_data = pickle.dumps("hs" + " " + str(self.train_samples) + " " + str(self.id) + " " + str(self.port_no))
                 s.sendall(mess_data)
 
                 time.sleep(1)   # delay before closing the socket
@@ -119,19 +126,31 @@ class FLClient():
             print("Client handshake error: ", e)
 
 
-    def send_model(self):
-        global RECEIVED
+
+    def save_log(self, average_loss, average_accuracy):
+        file_path = self.id + "_log.txt"
+        print("Saving to", file_path)
+
+        # append to file
+        with open(file_path, "w") as f:
+            f.write(str(average_loss) + " " + str(average_accuracy) + "\n")
+
+
+    def send_model(self, loss, accuracy):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s: # Create a socket object
                 s.connect((IP, PORT))
-                while(1):
-                    # create message containing id and model
-                    if RECEIVED:  
-                        print("Ready to send local model to server")                  
-                        RECEIVED = False
-                        mess_data = bytes(str(self.id) + " " + str(self.model), encoding= 'utf-8')
-                        s.sendall(mess_data)
+                print("Sending new local model")                  
+
+                client_data = pickle.dumps("sm" + " " + self.id + " " + str(loss) + " " + str(accuracy))
+                new_local_model_data = pickle.dumps(self.model)
+                s.sendall(client_data)
+                time.sleep(1)   # delay for 1 second before sending model
+                s.sendall(new_local_model_data)
                 s.close()
+
+                print("Sent new local model")  
+                       
         except Exception as e:
             print("Client send model error: ", e)
 
@@ -144,8 +163,16 @@ class FLClient():
                 s.listen(1)
                 while True:
                     c, addr = s.accept()
-                    
-                    print("Receiving model from server")
+                    average_training_data = c.recv(1024)
+                    server_message = pickle.loads(average_training_data).split(" ") 
+                    if len(server_message) == 3 and server_message[2] == 'stop':
+                        # stop training
+                        print("Stop Training")
+                        break
+                    average_loss, average_accuracy = map(float, server_message)
+
+                    print("I am", self.id[:-1], self.id[-1:])
+                    print("Receiving new global model")
                     global_model_data = b''
                     while True:
                         global_model_part_data = c.recv(4096)
@@ -156,26 +183,38 @@ class FLClient():
 
                     global_model_decode = pickle.loads(global_model_data)
                     print(len(global_model_data))
-                    print("Global model received from server: ", global_model_decode)
+                    print("Average loss: ", average_loss)
+                    print("Average accuracy: ", average_accuracy)
+                    print("Global model: ", global_model_decode)
 
                     if not global_model_data:
                         print("didn't get data")
                         break
                     
-                    # set global model
+                    # logs average loss and average accuracy to file
+                    if average_loss != -1.0 and average_accuracy != -1.0:
+                        # save if not first global round
+                        self.save_log(average_loss, average_accuracy)
+                        print("Training loss:", round(average_loss, 2))
+                        print(f"Training accuracy: {round(average_accuracy, 2)}%")
+
+
+                    # # set global model
                     self.set_parameters(global_model_decode)
 
                     # eval local test data with global model
                     # logs the training loss and accuracy of the global model
-                    accuracy = self.test()
+                    accuracy = self.test() * 100
+                    print(f'Local Testing Accuaracy: {accuracy}%')
 
                     # # train the model
                     loss = self.train(EPOCHS)
+                    print("Local Training loss: ", loss.item())
 
-                    print("Training loss: ", loss)
-                    print("Testing Accuracy: ", accuracy)
+                    # new local model trained and ready to send to server
+                    print("Local model trained")
+                    self.send_model(loss.item(), accuracy)
 
-                    # RECEIVED = True
                 s.close()
                 
         except Exception as e:
@@ -185,18 +224,7 @@ class FLClient():
 
     def run(self):
         self.send_handshake()
-
-        t1 = threading.Thread(target=self.receive_model, args=())
-        t2 = threading.Thread(target=self.send_model, args=())
-
-        t1.start()
-        t2.start()
-
-        t1.join()
-        t2.join()
-        while True:
-            print("Client waiting ")
-            time.sleep(10)
+        self.receive_model()
 
         return
 
