@@ -18,11 +18,14 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 import pickle
+import numpy as np
 
 IP = "127.0.0.1"
 START = False
 FIRST = False
-GLOBAL_ITERATIONS = 5
+GLOBAL_ITERATIONS = 100
+END = False
+LOCK = threading.Lock()
 new_local_models = []
 
 
@@ -93,6 +96,7 @@ class FLServer():
 
         new_local_models = [] # reset client local models for next global round
 
+
     def evaluate(self):
         total_accuracy = 0
         total_loss = 0
@@ -105,60 +109,67 @@ class FLServer():
 
 
     def handle_client(self):
-        global FIRST, new_local_models
+        global FIRST, new_local_models, END
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                # set timeout to stop this thread
+                s.settimeout(5) # this is for when the global iterations are ended
                 s.bind((IP, self.port_no)) # Bind to the port
                 s.listen(5)
                 while True:
-                    
-                    c, addr = s.accept()
-                    data_rev = c.recv(1024)
+                    try:
+                        c, addr = s.accept()
+                        data_rev = c.recv(1024)
 
-                    if len(data_rev) == 0 or not data_rev:
-                        print("Message is empty")
+                        if len(data_rev) == 0 or not data_rev:
+                            print("Message is empty")
 
-                    else:
-                        # determine message type
-                        # hs is a handshake message
-                        # otherwise it's a model message
+                        else:
+                            # determine message type
+                            # hs is a handshake message
+                            # otherwise it's a model message
 
-                        client_info = pickle.loads(data_rev).split(" ")
+                            client_info = pickle.loads(data_rev).split(" ")
+                            
+
+                            message_type = client_info[0]
+                            if message_type == "hs":
+                                # print("Received handshake message from client: ", client_info[1])
+                                # print(client_info)
+                                data_size, client_id, port_no = client_info[1:]
+
+                                # register client to client_list
+                                # critical section
+                                # LOCK.acquire()
+                                if START:
+                                    self.client_list[client_id] = (int(data_size), int(port_no), 0)
+                                else:
+                                    self.client_list[client_id] = (int(data_size), int(port_no), 1)
+
+                            elif message_type == "sm":
+                                client_id = client_info[1]
+                                print("Getting local model from client", client_id[-1:])
+                                # print(client_id, len(client_id))
+                                client_model_data = b''
+                                while True:
+                                    client_model_part_data = c.recv(4096)   
+                                    client_model_data += client_model_part_data
+                                    if len(client_model_part_data) == 0 or not client_model_part_data:
+                                        # print("No more messages")
+                                        break
+
+                                client_model_decode = pickle.loads(client_model_data)
+                                new_local_model = [client_info[1:], client_model_decode]
+                                new_local_models.append(new_local_model)
                         
 
-                        message_type = client_info[0]
-                        if message_type == "hs":
-                            print("Received handshake message from client: ", client_info[1])
-                            print(client_info)
-                            data_size, client_id, port_no = client_info[1:]
-                            # register client to client_list
-                            if START:
-                                self.client_list[client_id] = (int(data_size), int(port_no), 0)
-                            else:
-                                self.client_list[client_id] = (int(data_size), int(port_no), 1)
-
-                        elif message_type == "sm":
-                            client_id = client_info[1]
-                            print("Getting local model from client", client_id[-1:])
-                            print(client_id, len(client_id))
-                            client_model_data = b''
-                            while True:
-                                client_model_part_data = c.recv(4096)   
-                                client_model_data += client_model_part_data
-                                if len(client_model_part_data) == 0 or not client_model_part_data:
-                                    print("No more messages")
-                                    break
-
-                            client_model_decode = pickle.loads(client_model_data)
-                            new_local_model = [client_info[1:], client_model_decode]
-                            new_local_models.append(new_local_model)
-                       
-
-                        if not FIRST:
-                            print("First client connected")
-                            # waits for 30 seconds after receiving first handshake_message
-                            FIRST = True
-                    c.close()
+                            if not FIRST:
+                                print("First client connected\n")
+                                # waits for 30 seconds after receiving first handshake_message
+                                FIRST = True
+                        c.close()
+                    except socket.timeout:
+                        if END: break
                     
                 s.close()
                 
@@ -172,14 +183,15 @@ class FLServer():
         # print("Sending model to all registered clients")
 
         # broadcast global model to all clients
-        for client in self.client_list:
-            if self.client_list[client][2] == 0:
+        client_list = copy.deepcopy(self.client_list)
+        for client in client_list:
+            if client_list[client][2] == 0:
                 # wait for next global round
-                self.client_list[client][2] = 1
-                continue
+                new_value = (client_list[client][0], client_list[client][1], 1)
+                self.client_list[client] = new_value
 
 
-            client_port_no = self.client_list[client][1]
+            client_port_no = client_list[client][1]
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s: # Create a socket object
                     s.connect((IP, client_port_no))             
@@ -187,24 +199,46 @@ class FLServer():
 
                     time.sleep(1)
                     s.sendall(global_model_data)
-                    print("Sent global model to client: ", client)
+                    # print("Sent global model to client: ", client)
                     # print("Sent global model")
 
                     time.sleep(1)   # delay before closing socket
                     s.close()
             except Exception as e:
                 # client might be not alive
-                print(f'Client {client} not ative: + {e}')
+                print(f'Client {client} not active: + {e}')
+
+
+    def plot_figure(self, loss, acc):
+        
+        figure, axis = plt.subplots(2, 1)
+        axis[0].plot(loss, label="FedAvg")
+        axis[0].set_xlabel("Global rounds")
+        axis[0].set_ylabel("Loss")
+        axis[0].legend(loc="upper right")
+
+        axis[1].plot(acc, label="FedAvg")
+        # set y limit
+        axis[1].set_ylim(20, 100)
+        # set y tick to 10, from 10 to 100
+        axis[1].set_yticks(np.arange(10, 100, 10))
+        
+        axis[1].set_xlabel("Global rounds")
+        axis[1].set_ylabel("Accuracy")
+        axis[1].legend(loc='lower right')
+
+
+        plt.show()
 
 
     def fedAvg(self):
-        global GLOBAL_ITERATIONS, START
+        global GLOBAL_ITERATIONS, START, END
 
         loss = []
         acc = []
         while True:
             if START:
-                print("Start to run fedAvg")
+                print("Start to run fedAvg\n")
                 # Runing FedAvg
                 
                 # send global model to client initially
@@ -213,15 +247,21 @@ class FLServer():
                 self.send_parameters(global_model_data, average_train_data)
 
                 for glob_iter in range(GLOBAL_ITERATIONS):
-                    print("Global Iteration: ", glob_iter + 1)
+                    print(f"Global Iteration {glob_iter + 1}:")
                     print("Total Number of clients:", len(self.client_list))
 
                     # wait until all models are received from clients
                     while True:
-                        if len(new_local_models) == len(self.client_list):
+                        # current round active clients
+                        active_clients = 0
+                        clients = copy.deepcopy(self.client_list)
+                        for client in clients:
+                            if clients[client][2] == 1:
+                                active_clients += 1
+                        if len(new_local_models) == active_clients:
                             break
                     
-                    print("Received", len(new_local_models), "new local models")
+                    # print("Received", len(new_local_models), "new local models")
 
                     # Evaluate the global model across all clients
                     avg_acc, avg_loss = self.evaluate()
@@ -243,17 +283,26 @@ class FLServer():
                     if glob_iter == GLOBAL_ITERATIONS - 1:
                         # send stop message as well
                         average_train_data = pickle.dumps(str(self.average_loss) + " " + str(self.average_accuracy) + " " + "stop")
-                    self.send_parameters(global_model_data, average_train_data)
-                print("Completed all global iterations")
 
+                    self.send_parameters(global_model_data, average_train_data)
+                    print("\n")
+
+                print()
+                print("Completed all global iterations")
+                print("Average accuracy:", sum(acc)/len(acc))
+                print("Average loss:", sum(loss)/len(loss))
+
+                self.plot_figure(loss, acc)
+
+                END = True
                 break
     
     def wait_for_30_seconds(self):
         global FIRST, START
         while (1):
             if FIRST:
-                time.sleep(5)
-                print("30 SECONDS PASSED")
+                time.sleep(10)
+                # print("30 SECONDS PASSED")
                 START = True
                 break
     

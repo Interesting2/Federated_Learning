@@ -40,18 +40,23 @@ class FLClient():
 
         self.batch_size = random.choice([5, 10, 20])
         if (self.opt_method == 1):
-            self.trainloader = DataLoader(self.train_data, self.batch_size)   # mini-batch size is 5
+            self.trainloader = DataLoader(self.train_data, 5, shuffle=True)  
         else:
             self.trainloader = DataLoader(self.train_data, self.train_samples)
 
-        self.learning_rate = 0.01
+        self.learning_rate = 0.02
         self.loss = nn.NLLLoss()
 
         self.model = None
         self.optimizer = None
         
-        print("Client: Done initializing")
+        self.remove_log()
+        print("Client: Done initializing\n")
 
+    def remove_log(self):
+        file_path = self.id + "_log.txt"
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
     # receive global model from server
     def set_parameters(self, model):
@@ -129,10 +134,10 @@ class FLClient():
 
     def save_log(self, average_loss, average_accuracy):
         file_path = self.id + "_log.txt"
-        print("Saving to", file_path)
+        # print("Saving to", file_path)
 
         # append to file
-        with open(file_path, "w") as f:
+        with open(file_path, "a") as f:
             f.write(str(average_loss) + " " + str(average_accuracy) + "\n")
 
 
@@ -144,12 +149,13 @@ class FLClient():
 
                 client_data = pickle.dumps("sm" + " " + self.id + " " + str(loss) + " " + str(accuracy))
                 new_local_model_data = pickle.dumps(self.model)
+
                 s.sendall(client_data)
                 time.sleep(1)   # delay for 1 second before sending model
                 s.sendall(new_local_model_data)
                 s.close()
 
-                print("Sent new local model")  
+                # print("Sent new local model")  
                        
         except Exception as e:
             print("Client send model error: ", e)
@@ -178,14 +184,14 @@ class FLClient():
                         global_model_part_data = c.recv(4096)
                         global_model_data += global_model_part_data
                         if len(global_model_part_data) == 0 or not global_model_part_data:
-                            print("No more messages")
+                            # print("No more messages")
                             break
 
                     global_model_decode = pickle.loads(global_model_data)
-                    print(len(global_model_data))
-                    print("Average loss: ", average_loss)
-                    print("Average accuracy: ", average_accuracy)
-                    print("Global model: ", global_model_decode)
+                    # print(len(global_model_data))
+                    # print("Average loss: ", average_loss)
+                    # print("Average accuracy: ", average_accuracy)
+                    # print("Global model: ", global_model_decode)
 
                     if not global_model_data:
                         print("didn't get data")
@@ -196,7 +202,7 @@ class FLClient():
                         # save if not first global round
                         self.save_log(average_loss, average_accuracy)
                         print("Training loss:", round(average_loss, 2))
-                        print(f"Training accuracy: {round(average_accuracy, 2)}%")
+                        print(f"Testing accuracy: {round(average_accuracy, 2)}%")
 
 
                     # # set global model
@@ -205,15 +211,17 @@ class FLClient():
                     # eval local test data with global model
                     # logs the training loss and accuracy of the global model
                     accuracy = self.test() * 100
-                    print(f'Local Testing Accuaracy: {accuracy}%')
 
                     # # train the model
                     loss = self.train(EPOCHS)
+
+                    print(f'Local Testing Accuaracy: {round(accuracy, 2)}%')
                     print("Local Training loss: ", loss.item())
 
                     # new local model trained and ready to send to server
-                    print("Local model trained")
+                    # print("Local model trained")
                     self.send_model(loss.item(), accuracy)
+                    print("\n")
 
                 s.close()
                 
